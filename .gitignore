@@ -1,0 +1,27 @@
+# Python environments
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+
+# Dataset and large model files
+data/
+models/*.pth
+models/*.pt
+
+# Generated results
+outputs/
+*.log
+
+# Frontend dependencies and build output
+frontend/node_modules/
+frontend/dist/
+
+# OS and editor files
+.DS_Store
+.vscode/
