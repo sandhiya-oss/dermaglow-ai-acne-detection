@@ -14,8 +14,11 @@ from fastapi.middleware.cors import CORSMiddleware
 # SETTINGS
 # ==========================================
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 MODEL_PATH = os.path.join(
-    BASE_DIR, "models", "acne_ldl_resnet50_best.pth"
+    BASE_DIR,
+    "models",
+    "acne_ldl_resnet50_best.pth",
 )
 
 DEVICE = torch.device(
@@ -32,7 +35,6 @@ CLASS_NAMES = [
     "Level 3",
 ]
 
-# Use the same preprocessing as the evaluation script.
 IMAGE_TRANSFORM = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
@@ -45,7 +47,6 @@ IMAGE_TRANSFORM = transforms.Compose([
 
 # ==========================================
 # MODEL ARCHITECTURE
-# Matches evaluate_best_model.py
 # ==========================================
 class AcneLDLResNet50(nn.Module):
     def __init__(self):
@@ -84,24 +85,38 @@ class AcneLDLResNet50(nn.Module):
 # ==========================================
 # LOAD EXISTING TRAINED MODEL
 # ==========================================
-if not os.path.isfile(MODEL_PATH):
-    raise FileNotFoundError(
-        f"Trained model was not found at: {MODEL_PATH}"
+# The model is optional during CI testing because
+# large model weights are not stored in GitHub.
+# If the weights exist, load the real trained model.
+
+model = None
+
+if os.path.isfile(MODEL_PATH):
+    model = AcneLDLResNet50()
+
+    checkpoint = torch.load(
+        MODEL_PATH,
+        map_location=DEVICE,
     )
 
-model = AcneLDLResNet50()
+    if (
+        isinstance(checkpoint, dict)
+        and "model_state_dict" in checkpoint
+    ):
+        model.load_state_dict(checkpoint["model_state_dict"])
+    else:
+        model.load_state_dict(checkpoint)
 
-checkpoint = torch.load(MODEL_PATH, map_location=DEVICE)
+    model.to(DEVICE)
+    model.eval()
 
-if isinstance(checkpoint, dict) and "model_state_dict" in checkpoint:
-    model.load_state_dict(checkpoint["model_state_dict"])
+    print(f"Acne model loaded successfully on {DEVICE}")
+
 else:
-    model.load_state_dict(checkpoint)
-
-model.to(DEVICE)
-model.eval()
-
-print(f"Acne model loaded successfully on {DEVICE}")
+    print(
+        "WARNING: Trained model not found. "
+        "API tests can run, but predictions are unavailable."
+    )
 
 
 # ==========================================
@@ -125,26 +140,36 @@ app.add_middleware(
 )
 
 
+# ==========================================
+# HOME ENDPOINT
+# ==========================================
 @app.get("/")
 def home():
     return {
         "message": "DermaGlow AI backend is running",
         "device": str(DEVICE),
-        "model_loaded": True,
+        "model_loaded": model is not None,
     }
 
 
+# ==========================================
+# HEALTH ENDPOINT
+# ==========================================
 @app.get("/health")
 def health():
     return {
         "status": "healthy",
         "device": str(DEVICE),
-        "model_loaded": True,
+        "model_loaded": model is not None,
     }
 
 
+# ==========================================
+# PREDICTION ENDPOINT
+# ==========================================
 @app.post("/predict")
 async def predict(file: UploadFile = File(...)):
+
     if file.content_type and not file.content_type.startswith("image/"):
         raise HTTPException(
             status_code=400,
@@ -165,10 +190,26 @@ async def predict(file: UploadFile = File(...)):
 
     except HTTPException:
         raise
-    except (UnidentifiedImageError, OSError, ValueError):
+
+    except (
+        UnidentifiedImageError,
+        OSError,
+        ValueError,
+    ):
         raise HTTPException(
             status_code=400,
             detail="The file could not be read as an image.",
+        )
+
+    # Return a clear error if model weights are unavailable.
+    # This lets CI test the API without uploading large weights.
+    if model is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "The trained model is unavailable. "
+                "Install the model weights to enable predictions."
+            ),
         )
 
     image_tensor = IMAGE_TRANSFORM(image).unsqueeze(0).to(DEVICE)
@@ -177,22 +218,21 @@ async def predict(file: UploadFile = File(...)):
         with torch.no_grad():
             cls, count, count_to_class = model(image_tensor)
 
-            # Same combined prediction rule as the evaluation script.
+            # Preserve the existing evaluation prediction rule.
             combined = cls + count_to_class
 
             predicted_index = int(
                 torch.argmax(combined, dim=1).item()
             )
 
-            # Normalize combined scores for display only.
-            # The predicted class remains the same.
             normalized_scores = (
                 combined[0] / combined[0].sum()
             )
 
             class_scores = {
                 CLASS_NAMES[i]: round(
-                    float(normalized_scores[i].item()) * 100, 2
+                    float(normalized_scores[i].item()) * 100,
+                    2,
                 )
                 for i in range(NUM_CLASSES)
             }
@@ -210,6 +250,9 @@ async def predict(file: UploadFile = File(...)):
                 "not a medical diagnosis."
             ),
         }
+
+    except HTTPException:
+        raise
 
     except Exception as exc:
         raise HTTPException(
